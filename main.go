@@ -21,6 +21,18 @@ func (fn handlerFuncEx) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 }
 
+func await(rdb *redis.Client, id string, timeout time.Duration) bool {
+	sub := rdb.Subscribe(context.Background(), id)
+	defer sub.Unsubscribe(context.Background(), id)
+	ch := sub.Channel()
+	select {
+	case <-ch:
+		return true
+	case <-time.After(time.Second * 15):
+		return false
+	}
+}
+
 func main() {
 	var (
 		host     = flag.String("c", "", "host of redis to connect")
@@ -59,25 +71,27 @@ func main() {
 				return err
 			}
 			id := mux.Vars(req)["id"]
-			result, err := rdb.HExists(context.Background(), id, "d").Result()
+			exist, err := rdb.HExists(context.Background(), id, "d").Result()
 			if err != nil {
 				return err
 			}
-			// set only when not exists
-			if !result {
-				contentType := req.Header.Get("content-type")
-				origin := req.Header.Get("origin")
-				if _, err := rdb.HMSet(context.Background(), id, map[string]interface{}{
-					"d": string(data),
-					"t": contentType,
-					"o": origin,
-				}).Result(); err != nil {
-					return err
-				}
-				rdb.Publish(context.Background(), id, true)
+
+			if exist {
+				w.WriteHeader(http.StatusAccepted)
+				return nil
 			}
 
-			w.WriteHeader(http.StatusOK)
+			// set only when not exists
+			contentType := req.Header.Get("content-type")
+			origin := req.Header.Get("origin")
+			if _, err := rdb.HMSet(context.Background(), id, map[string]interface{}{
+				"d": string(data),
+				"t": contentType,
+				"o": origin,
+			}).Result(); err != nil {
+				return err
+			}
+			rdb.Publish(context.Background(), id, true)
 			return nil
 		}))
 
@@ -103,20 +117,7 @@ func main() {
 					return nil
 				}
 
-				if !longPolling {
-					break
-				}
-
-				sub := rdb.Subscribe(context.Background(), id)
-				ch := sub.Channel()
-				timeout := false
-				select {
-				case <-ch:
-				case <-time.After(time.Second * 15):
-					timeout = true
-				}
-				sub.Unsubscribe(context.Background(), id)
-				if timeout {
+				if !longPolling || !await(rdb, id, time.Second*15) {
 					break
 				}
 			}
