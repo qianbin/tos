@@ -7,6 +7,7 @@ import (
 	"io/ioutil"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/go-redis/redis/v8"
 	"github.com/gorilla/mux"
@@ -78,6 +79,7 @@ func main() {
 				}).Result(); err != nil {
 					return err
 				}
+				rdb.Publish(context.Background(), id, true)
 			}
 
 			w.WriteHeader(http.StatusOK)
@@ -90,21 +92,40 @@ func main() {
 		Handler(handlerFuncEx(func(w http.ResponseWriter, req *http.Request) error {
 			id := mux.Vars(req)["id"]
 
-			result, err := rdb.HMGet(context.Background(), id, "d", "t", "o").Result()
-			if err != nil {
-				return err
+			waitFlag := req.URL.Query().Get("wait")
+			longPolling := waitFlag == "1" || waitFlag == "true"
+
+			for {
+				result, err := rdb.HMGet(context.Background(), id, "d", "t", "o").Result()
+				if err != nil {
+					return err
+				}
+
+				if result[0] != nil && result[1] != nil && result[2] != nil {
+					w.Header().Set("content-type", result[1].(string))
+					w.Header().Set("x-data-origin", result[2].(string))
+					w.Write([]byte(result[0].(string)))
+					return nil
+				}
+
+				if !longPolling {
+					break
+				}
+
+				sub := rdb.Subscribe(context.Background(), id)
+				ch := sub.Channel()
+				timeout := false
+				select {
+				case <-ch:
+				case <-time.After(time.Second * 15):
+					timeout = true
+				}
+				sub.Unsubscribe(context.Background(), id)
+				if timeout {
+					break
+				}
 			}
-
-			if result[0] == nil || result[1] == nil || result[2] == nil {
-				// TODO: long polling
-
-				w.WriteHeader(http.StatusNoContent)
-				return nil
-			}
-
-			w.Header().Set("content-type", result[1].(string))
-			w.Header().Set("x-data-origin", result[2].(string))
-			w.Write([]byte(result[0].(string)))
+			w.WriteHeader(http.StatusNoContent)
 			return nil
 		}))
 
