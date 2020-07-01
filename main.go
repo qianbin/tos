@@ -70,9 +70,11 @@ func main() {
 			// set only when not exists
 			if !result {
 				contentType := req.Header.Get("content-type")
+				origin := req.Header.Get("origin")
 				if _, err := rdb.HMSet(context.Background(), id, map[string]interface{}{
 					"d": string(data),
 					"t": contentType,
+					"o": origin,
 				}).Result(); err != nil {
 					return err
 				}
@@ -88,23 +90,20 @@ func main() {
 		Handler(handlerFuncEx(func(w http.ResponseWriter, req *http.Request) error {
 			id := mux.Vars(req)["id"]
 
-			result, err := rdb.HMGet(context.Background(), id, "d", "t").Result()
+			result, err := rdb.HMGet(context.Background(), id, "d", "t", "o").Result()
 			if err != nil {
 				return err
 			}
 
-			if result[0] == nil || result[1] == nil {
+			if result[0] == nil || result[1] == nil || result[2] == nil {
+				// TODO: long polling
+
 				w.WriteHeader(http.StatusNoContent)
 				return nil
 			}
 
-			// long polling
-			// wait:=req.URL.Query().Get("wait")
-			// if wait == "1" || wait == "true" {
-
-			// }
-
 			w.Header().Set("content-type", result[1].(string))
+			w.Header().Set("x-data-origin", result[2].(string))
 			w.Write([]byte(result[0].(string)))
 			return nil
 		}))
