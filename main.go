@@ -1,10 +1,14 @@
 package main
 
 import (
+	"context"
+	"flag"
+	"fmt"
 	"io/ioutil"
 	"net/http"
-	"sync"
+	"os"
 
+	"github.com/go-redis/redis/v8"
 	"github.com/gorilla/mux"
 )
 
@@ -23,37 +27,76 @@ type object struct {
 
 func main() {
 	var (
-		objectMap = make(map[string]*object)
-		lock      sync.Mutex
-		router    = mux.NewRouter()
+		host     = flag.String("c", "", "host of redis to connect")
+		password = flag.String("p", "", "password of redis")
+		db       = flag.Int("db", 0, "redis db")
+		bind     = flag.String("bind", ":8765", "http bind")
 	)
 
-	router.Path("/{key}").
-		Methods(http.MethodGet).
-		Handler(handlerFuncEx(func(w http.ResponseWriter, req *http.Request) error {
-			key := mux.Vars(req)["key"]
-			var obj *object
-			lock.Lock()
-			obj = objectMap[key]
-			lock.Unlock()
+	flag.Parse()
+	if *host == "" {
+		flag.Usage()
+		os.Exit(1)
+	}
 
-			if obj == nil {
-				w.WriteHeader(http.StatusNotFound)
-				return nil
-			}
-			w.Header().Set("content-type", obj.contentType)
-			w.Write(obj.data)
-			return nil
-		}))
+	rdb := redis.NewClient(&redis.Options{
+		Addr:     *host,
+		Password: *password,
+		DB:       *db,
+	})
 
-	router.Path("/{key}").
+	if _, err := rdb.Ping(context.Background()).Result(); err != nil {
+		fmt.Fprintln(os.Stderr, "failed to connect to redis", err)
+		os.Exit(1)
+	}
+
+	fmt.Println("connected to redis @", *host)
+
+	router := mux.NewRouter()
+
+	// POST /{id}
+	router.Path("/{id}").
 		Methods(http.MethodPost).
 		Handler(handlerFuncEx(func(w http.ResponseWriter, req *http.Request) error {
 			data, err := ioutil.ReadAll(req.Body)
 			if err != nil {
 				return err
 			}
-			key := mux.Vars(req)["key"]
+			id := mux.Vars(req)["id"]
+			result, err := rdb.HExists(context.Background(), id, "d").Result()
+			if err != nil {
+				return err
+			}
+			// set only when not exists
+			if !result {
+				contentType := req.Header.Get("content-type")
+				if _, err := rdb.HMSet(context.Background(), id, map[string]interface{}{
+					"d": string(data),
+					"t": contentType,
+				}).Result(); err != nil {
+					return err
+				}
+			}
+
+			w.WriteHeader(http.StatusOK)
+			return nil
+		}))
+
+	// GET /{id}
+	router.Path("/{id}").
+		Methods(http.MethodGet).
+		Handler(handlerFuncEx(func(w http.ResponseWriter, req *http.Request) error {
+			id := mux.Vars(req)["id"]
+
+			result, err := rdb.HMGet(context.Background(), id, "d", "t").Result()
+			if err != nil {
+				return err
+			}
+
+			if result[0] == nil || result[1] == nil {
+				w.WriteHeader(http.StatusNoContent)
+				return nil
+			}
 
 			// long polling
 			// wait:=req.URL.Query().Get("wait")
@@ -61,15 +104,12 @@ func main() {
 
 			// }
 
-			lock.Lock()
-			if objectMap[key] == nil {
-				objectMap[key] = &object{data, req.Header.Get("content-type")}
-			}
-			lock.Unlock()
-
-			w.WriteHeader(http.StatusOK)
+			w.Header().Set("content-type", result[1].(string))
+			w.Write([]byte(result[0].(string)))
 			return nil
 		}))
 
-	http.ListenAndServe(":8765", router)
+	if err := http.ListenAndServe(*bind, router); err != nil {
+		fmt.Fprintln(os.Stderr, "failed to listen http", err)
+	}
 }
