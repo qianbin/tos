@@ -21,11 +21,6 @@ func (fn handlerFuncEx) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 }
 
-type object struct {
-	data        []byte
-	contentType string
-}
-
 func main() {
 	var (
 		host     = flag.String("c", "", "host of redis to connect")
