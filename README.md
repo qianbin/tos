@@ -1,2 +1,2 @@
 # tos
-Temporary object storage
+Temporary object sharing
