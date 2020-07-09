@@ -99,6 +99,8 @@ func main() {
 			}).Result(); err != nil {
 				return err
 			}
+			// expire in 10 mins
+			rdb.Expire(context.Background(), id, time.Minute*10)
 			rdb.Publish(context.Background(), id, true)
 			return nil
 		}))
