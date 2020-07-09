@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"flag"
 	"fmt"
@@ -71,17 +72,24 @@ func main() {
 				return err
 			}
 			id := mux.Vars(req)["id"]
-			exist, err := rdb.HExists(context.Background(), id, "d").Result()
+			exist, err := rdb.HGet(context.Background(), id, "d").Bytes()
 			if err != nil {
-				return err
-			}
-
-			if exist {
-				w.WriteHeader(http.StatusAccepted)
+				if err != redis.Nil {
+					return err
+				}
+				// not exists
+			} else {
+				// exists
+				// ok if data not changed
+				if bytes.Compare(exist, data) == 0 {
+					return nil
+				}
+				// reject mutating data
+				w.WriteHeader(http.StatusForbidden)
+				w.Write([]byte("id already exists"))
 				return nil
 			}
 
-			// set only when not exists
 			contentType := req.Header.Get("content-type")
 			origin := req.Header.Get("origin")
 			if _, err := rdb.HMSet(context.Background(), id, map[string]interface{}{
