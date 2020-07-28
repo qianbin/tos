@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io/ioutil"
+	"net"
 	"net/http"
 	"os"
 	"time"
@@ -146,7 +147,12 @@ func main() {
 			return nil
 		}))
 
-	if err := http.ListenAndServe(*bind, router); err != nil {
-		fmt.Fprintln(os.Stderr, "failed to listen http", err)
+	listener, err := net.Listen("tcp", *bind)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "failed to listen http on", *bind, err)
 	}
+
+	fmt.Println("http listening on", listener.Addr())
+
+	http.Serve(listener, router)
 }
