@@ -51,7 +51,7 @@ func poll(ctx context.Context, kv kv.KV, key string, sec int) ([]byte, error) {
 func main() {
 	var (
 		url  = flag.String("c", "", "url of remote store to connect")
-		bind = flag.String("bind", ":8765", "http bind")
+		bind = flag.String("bind", ":5678", "http bind")
 	)
 
 	flag.Parse()
