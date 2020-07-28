@@ -140,8 +140,12 @@ func main() {
 			if err := json.Unmarshal(data, &entity); err != nil {
 				return err
 			}
-			w.Header().Set("content-type", entity.T)
-			w.Header().Set("x-data-origin", entity.O)
+			if entity.T != "" {
+				w.Header().Set("content-type", entity.T)
+			}
+			if entity.O != "" {
+				w.Header().Set("x-data-origin", entity.O)
+			}
 			w.Write(entity.C)
 
 			return nil
