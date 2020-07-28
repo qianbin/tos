@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io/ioutil"
@@ -10,8 +11,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/go-redis/redis/v8"
 	"github.com/gorilla/mux"
+	"github.com/qianbin/tos/kv"
 )
 
 type handlerFuncEx func(w http.ResponseWriter, req *http.Request) error
@@ -22,44 +23,46 @@ func (fn handlerFuncEx) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 }
 
-func await(rdb *redis.Client, id string, timeout time.Duration) bool {
-	sub := rdb.Subscribe(context.Background(), id)
-	defer sub.Unsubscribe(context.Background(), id)
-	ch := sub.Channel()
-	select {
-	case <-ch:
-		return true
-	case <-time.After(time.Second * 15):
-		return false
+type entity struct {
+	C []byte // content
+	T string // content type
+	O string // origin
+}
+
+func poll(ctx context.Context, kv kv.KV, key string, sec int) ([]byte, error) {
+	for i := 0; i < sec; i++ {
+		val, err := kv.Get(ctx, key)
+		if err != nil {
+			return nil, err
+		}
+		if len(val) > 0 {
+			return val, nil
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(time.Second):
+		}
 	}
+	return nil, nil
 }
 
 func main() {
 	var (
-		host     = flag.String("c", "", "host of redis to connect")
-		password = flag.String("p", "", "password of redis")
-		db       = flag.Int("db", 0, "redis db")
-		bind     = flag.String("bind", ":8765", "http bind")
+		url  = flag.String("c", "", "url of remote store to connect")
+		bind = flag.String("bind", ":8765", "http bind")
 	)
 
 	flag.Parse()
-	if *host == "" {
-		flag.Usage()
+
+	kv, err := kv.New(context.Background(), *url)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "failed to connect to remote store", err)
 		os.Exit(1)
 	}
-
-	rdb := redis.NewClient(&redis.Options{
-		Addr:     *host,
-		Password: *password,
-		DB:       *db,
-	})
-
-	if _, err := rdb.Ping(context.Background()).Result(); err != nil {
-		fmt.Fprintln(os.Stderr, "failed to connect to redis", err)
-		os.Exit(1)
+	if *url != "" {
+		fmt.Println("connected to", *url)
 	}
-
-	fmt.Println("connected to redis @", *host)
 
 	router := mux.NewRouter()
 
@@ -67,18 +70,28 @@ func main() {
 	router.Path("/{id}").
 		Methods(http.MethodPost).
 		Handler(handlerFuncEx(func(w http.ResponseWriter, req *http.Request) error {
-			data, err := ioutil.ReadAll(req.Body)
+			content, err := ioutil.ReadAll(req.Body)
 			if err != nil {
 				return err
 			}
 			id := mux.Vars(req)["id"]
-			exist, err := rdb.HGet(context.Background(), id, "d").Bytes()
+
+			entity := &entity{
+				C: content,
+				T: req.Header.Get("content-type"),
+				O: req.Header.Get("origin"),
+			}
+			data, err := json.Marshal(entity)
 			if err != nil {
-				if err != redis.Nil {
-					return err
-				}
-				// not exists
-			} else {
+				return err
+			}
+
+			// TODO race condition
+			exist, err := kv.Get(req.Context(), id)
+			if err != nil {
+				return err
+			}
+			if len(exist) > 0 {
 				// exists
 				// ok if data not changed
 				if bytes.Compare(exist, data) == 0 {
@@ -90,48 +103,46 @@ func main() {
 				return nil
 			}
 
-			contentType := req.Header.Get("content-type")
-			origin := req.Header.Get("origin")
-			if _, err := rdb.HMSet(context.Background(), id, map[string]interface{}{
-				"d": string(data),
-				"t": contentType,
-				"o": origin,
-			}).Result(); err != nil {
+			if err := kv.Set(req.Context(), id, data, time.Minute*10); err != nil {
 				return err
 			}
-			// expire in 10 mins
-			rdb.Expire(context.Background(), id, time.Minute*10)
-			rdb.Publish(context.Background(), id, true)
 			return nil
 		}))
 
 	// GET /{id}
 	router.Path("/{id}").
 		Methods(http.MethodGet).
-		Handler(handlerFuncEx(func(w http.ResponseWriter, req *http.Request) error {
-			id := mux.Vars(req)["id"]
+		Handler(handlerFuncEx(func(w http.ResponseWriter, req *http.Request) (err error) {
+			var (
+				id          = mux.Vars(req)["id"]
+				waitFlag    = req.URL.Query().Get("wait")
+				longPolling = waitFlag == "1" || waitFlag == "true"
+				data        []byte
+			)
 
-			waitFlag := req.URL.Query().Get("wait")
-			longPolling := waitFlag == "1" || waitFlag == "true"
-
-			for {
-				result, err := rdb.HMGet(context.Background(), id, "d", "t", "o").Result()
-				if err != nil {
-					return err
-				}
-
-				if result[0] != nil && result[1] != nil && result[2] != nil {
-					w.Header().Set("content-type", result[1].(string))
-					w.Header().Set("x-data-origin", result[2].(string))
-					w.Write([]byte(result[0].(string)))
-					return nil
-				}
-
-				if !longPolling || !await(rdb, id, time.Second*15) {
-					break
-				}
+			if longPolling {
+				data, err = poll(req.Context(), kv, id, 15)
+			} else {
+				data, err = kv.Get(req.Context(), id)
 			}
-			w.WriteHeader(http.StatusNoContent)
+
+			if err != nil {
+				return err
+			}
+
+			if len(data) == 0 {
+				w.WriteHeader(http.StatusNoContent)
+				return nil
+			}
+
+			var entity entity
+			if err := json.Unmarshal(data, &entity); err != nil {
+				return err
+			}
+			w.Header().Set("content-type", entity.T)
+			w.Header().Set("x-data-origin", entity.O)
+			w.Write(entity.C)
+
 			return nil
 		}))
 
