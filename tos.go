@@ -10,9 +10,11 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/gorilla/mux"
+	"github.com/mat/besticon/besticon"
 	"github.com/qianbin/tos/kv"
 )
 
@@ -116,7 +118,7 @@ func main() {
 		Handler(handlerFuncEx(func(w http.ResponseWriter, req *http.Request) (err error) {
 			var (
 				id          = mux.Vars(req)["id"]
-				waitFlag    = req.URL.Query().Get("wait")
+				waitFlag    = req.FormValue("wait")
 				longPolling = waitFlag == "1" || waitFlag == "true"
 				data        []byte
 			)
@@ -149,6 +151,52 @@ func main() {
 			w.Write(entity.C)
 
 			return nil
+		}))
+
+	router.Path("/{id}/icon").
+		Methods(http.MethodGet).
+		Handler(handlerFuncEx(func(w http.ResponseWriter, req *http.Request) (err error) {
+			var (
+				id      = mux.Vars(req)["id"]
+				size    = req.FormValue("size")
+				formats = req.FormValue("formats")
+			)
+
+			sizeRange, err := besticon.ParseSizeRange(size)
+			if err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return nil
+			}
+
+			data, err := kv.Get(req.Context(), id)
+			if err != nil {
+				return err
+			}
+
+			if len(data) == 0 {
+				w.WriteHeader(http.StatusNoContent)
+				return nil
+			}
+			var entity entity
+			if err := json.Unmarshal(data, &entity); err != nil {
+				return err
+			}
+
+			finder := besticon.IconFinder{}
+			if formats != "" {
+				finder.FormatsAllowed = strings.Split(formats, ",")
+			}
+
+			finder.FetchIcons(entity.O)
+
+			icon := finder.IconInSizeRange(*sizeRange)
+			if icon != nil {
+				http.Redirect(w, req, icon.URL, http.StatusFound)
+				return
+			}
+
+			w.WriteHeader(http.StatusNoContent)
+			return
 		}))
 
 	listener, err := net.Listen("tcp", *bind)
