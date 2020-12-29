@@ -104,7 +104,7 @@ func main() {
 				return nil
 			}
 
-			if err := kv.Set(req.Context(), id, data, time.Minute*10); err != nil {
+			if err := kv.Set(req.Context(), id, data, time.Hour); err != nil {
 				return err
 			}
 			return nil
